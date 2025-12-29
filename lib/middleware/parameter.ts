@@ -100,7 +100,11 @@ const middleware: MiddlewareHandler = async (ctx, next) => {
                     baseUrl = /^\/\//.test(baseUrl) ? 'http:' + baseUrl : 'http://' + baseUrl;
                 }
 
-                item.link = new URL(item.link, baseUrl).href;
+                try {
+                    item.link = new URL(item.link, baseUrl).href;
+                } catch {
+                    // no-empty
+                }
             }
 
             // handle description

@@ -1,190 +1,142 @@
 import { load } from 'cheerio';
-import sanitizeHtml from 'sanitize-html';
+import got from 'got';
 
-import { fetchContent } from '@/routes/_transform/utils';
-import type { DataItem, Language, Route } from '@/types';
-import cache from '@/utils/cache';
+import type { Data, DataItem, Route } from '@/types';
 import logger from '@/utils/logger';
 
-function escape(selector: string): string {
-    // Split by comma to handle multiple selectors, then escape each
-    return selector
-        .split(',')
-        .map((s) => s.trim().replaceAll(':', String.raw`\:`))
-        .join(', ');
-}
+import { BrowserSession } from './browser-session';
+import { getContent } from './get-content';
+import type { RouteParams } from './types';
+
+const FEED_MAP = {
+    'content:encoded': 'description',
+    'dc:content': 'description',
+    'dc:creator': 'author',
+};
+
+const DEFAULT_ROUTE_PARAMS = {
+    maxItems: 20,
+    useBrowser: false,
+};
 
 async function handler(ctx) {
     const url = ctx.req.param('url');
-
-    const defaults = {
-        useBrowser: '0',
-        waitUntil: 'networkidle2',
-        encoding: 'utf-8',
-        filterCategory: '',
-        maxItems: 20,
-        item: 'item',
-        title: 'channel > title, feed > title',
-        language: 'language',
-        description: 'description',
-        link: 'link',
-        itemTitle: 'title',
-        itemLink: 'link',
-        itemDescription: 'description',
-        itemPubDate: 'pubDate',
-        itemGuid: 'guid',
-        itemId: 'id',
-        itemImage: 'image',
-        itemAuthor: 'author, dc:creator',
-        itemCategory: 'category',
-        itemEnclosure: 'enclosure',
-        itemUpdated: 'updated',
-        itemContent: '',
+    const routeParamsString = ctx.req.param('routeParams');
+    const routeParams: RouteParams = {
+        ...DEFAULT_ROUTE_PARAMS,
+        ...JSON.parse(routeParamsString || '{}'),
     };
+    const session = new BrowserSession();
+    const response = routeParams.useBrowser
+        ? await session.run(async (page) => {
+              await page.goto(url, { waitUntil: 'networkidle2', timeout: 10000 });
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+              return await page.evaluate(() => document.documentElement.outerHTML);
+          })
+        : await got(url).text();
 
-    const p = {
-        ...defaults,
-        ...Object.fromEntries(new URLSearchParams(ctx.req.param('routeParams') || '')),
+    if (!response) {
+        logger.error(`[_transform/rss2] No RSS feed found`);
+        await session.close();
+        return null;
+    }
+
+    let $ = load(response, { xmlMode: true });
+    if ($('pre').first().length) {
+        $ = load($('pre').first().text(), { xmlMode: true });
+    }
+
+    const data: Partial<Data> = {};
+    $('rss > channel, rss, feed > channel, feed')
+        .children()
+        .each((_, el) => {
+            if (!['item', 'entry'].includes(el.tagName)) {
+                data[el.tagName] = $(el).text().trim();
+            }
+        });
+
+    const feedMap = {
+        ...FEED_MAP,
+        ...Object.fromEntries(Object.entries(routeParams.feed || {}).map(([k, v]) => [v, k])),
     };
-
-    const filterCategories =
-        p.filterCategory.trim().length > 0
-            ? p.filterCategory
-                  .split(',')
-                  .map((c) => c.trim())
-                  .filter(Boolean)
-            : [];
-
-    const content = await fetchContent(url, {
-        useBrowser: p.useBrowser,
-        waitUntil: p.waitUntil,
-        encoding: p.encoding,
+    $('item, entry').each((_, el) => {
+        data.item = data.item ?? [];
+        const item: Partial<DataItem> = {};
+        $(el)
+            .children()
+            .each((_, child) => {
+                if (data.item && data.item.length >= Number(routeParams.maxItems)) {
+                    return;
+                }
+                const name = feedMap?.[child.tagName] || child.tagName;
+                logger.info(`[_transform/rss2] name: ${name} text: ${$(child).text().trim()}`);
+                if (name === 'category') {
+                    item.category = item.category ?? [];
+                    item.category.push($(child).text().trim());
+                } else if (name === 'enclosure') {
+                    item.enclosure_url = $(child).attr('url');
+                    item.enclosure_type = $(child).attr('type');
+                    item.enclosure_length = Number($(child).attr('length'));
+                    item.enclosure_title = $(child).attr('description');
+                } else if (name.startsWith('media:')) {
+                    item.media = item.media ?? {};
+                    let key = name.replace('media:', '');
+                    if (item.media[key]) {
+                        key = `${key}_${Object.keys(item.media).filter((k) => k.startsWith(key)).length}`;
+                    }
+                    item.media[key] = {
+                        ...child.attribs,
+                        text: $(child).text().trim(),
+                    };
+                } else if (name === 'link') {
+                    let link = $(child).text().trim() || $(child).attr('href')?.trim();
+                    if (link && !link.startsWith('http')) {
+                        try {
+                            link = new URL(link, url).href;
+                            logger.debug(`[_transform/rss2] link: ${link}`);
+                        } catch {
+                            link = undefined;
+                        }
+                    }
+                    if (link) {
+                        item[name] = link;
+                    }
+                } else {
+                    if (item[name]) {
+                        return;
+                    }
+                    item[name] = $(child).text().trim();
+                    // logger.info(`[_transform/rss2] item[${name}]: ${item[name]}`);
+                }
+            });
+        data.item.push(item as DataItem);
     });
 
-    const $ = load(content, { xmlMode: true });
-    const rss = $('rss, feed');
-    if (!rss.length) {
-        throw new Error('Invalid RSS/Atom feed: missing <rss> or <feed> root element');
+    if (routeParams.filterCategory && routeParams.filterCategory.length > 0) {
+        const filterCategories = routeParams.filterCategory.map((c) => c.toLowerCase().trim());
+        data.item = data.item?.filter((item) => item.category?.some((c) => filterCategories?.includes(c.toLowerCase().trim())));
     }
 
-    const header = {
-        title: $(p.title).first().text(),
-        link: $(p.link).first().text(),
-        description: `Proxy ${url}`,
-        language: $(p.language).first().text() as Language | undefined,
-    };
+    data.item = data.item?.slice(0, routeParams.maxItems);
 
-    const itemSelector = p.item || ($('feed').length > 0 ? 'entry' : 'item');
-    let items: Partial<DataItem>[] = [];
-
-    for (const i of $(itemSelector).toArray()) {
-        try {
-            if (items.length >= Number(p.maxItems)) {
-                break;
-            }
-            const $i = $(i);
-
-            const res: Partial<DataItem> = {
-                title: $i.find(escape(p.itemTitle)).first().text(),
-                link: $i.find(escape(p.itemLink)).first().text() || $i.find(escape(p.itemLink)).first().attr('href'),
-                description: $i.find(escape(p.itemDescription)).first().text(),
-                pubDate: $i.find(escape(p.itemPubDate)).first().text(),
-                guid: $i.find(escape(p.itemGuid)).first().text(),
-                id: $i.find(escape(p.itemId)).first().text(),
-                author: $i.find(escape(p.itemAuthor)).first().text(),
-                category: $i
-                    .find(escape(p.itemCategory))
-                    .toArray()
-                    .map((el) => $(el).text().trim())
-                    .filter(Boolean),
-                updated: $i.find(escape(p.itemUpdated)).first().text(),
-                enclosure_url: $i.find(escape(p.itemEnclosure)).first().attr('url'),
-                enclosure_type: $i.find(escape(p.itemEnclosure)).first().attr('type'),
-                enclosure_length: Number($i.find(escape(p.itemEnclosure)).first().attr('length')),
-                enclosure_title: $i.find(escape(p.itemEnclosure)).first().attr('description'),
-            };
-
-            if (res.link && !res.link.startsWith('http')) {
-                res.link = new URL(res.link, url).href;
-            }
-
-            if (filterCategories.length > 0 && res.category) {
-                const itemCategories = Array.isArray(res.category) ? res.category : [res.category];
-                const hasMatch = itemCategories.some((cat) => filterCategories.includes(cat));
-                if (!hasMatch) {
-                    continue; // Skip this item
-                }
-            }
-
-            items.push(res);
-        } catch (error: any) {
-            logger.warn(`[_transform/rss] Failed to parse item: ${error.message}`);
-            continue;
-        }
+    if (!routeParams.content || !data.item?.length) {
+        await session.close();
+        return data;
     }
 
-    if (p.itemContent) {
-        logger.info(`[_transform/rss] Extracting content for ${items.length} items`);
-        items = await Promise.all(
-            items.map((item) => {
-                if (!item.link) {
-                    return item;
-                }
-                logger.info(`[_transform/rss] Extracting content for ${item.link}`);
+    data.item = await getContent(data.item, {
+        cachePrefix: `_transform:${url}:${routeParamsString}`,
+        articleSelector: routeParams.content,
+        articleMediaSelector: routeParams.media,
+        session: routeParams.useBrowser ? session : undefined,
+        exclude: routeParams.exclude,
+    });
 
-                return cache.tryGet(`_transform:${item.link}:${p.itemContent}`, async () => {
-                    const response = await fetchContent(
-                        item.link!,
-                        {
-                            useBrowser: p.useBrowser,
-                            waitUntil: p.waitUntil,
-                            encoding: p.encoding,
-                        },
-                        p.itemContent
-                    );
-                    logger.info(`[_transform/rss] Response: ${response.slice(0, 500)}`);
-                    if (!response || typeof response !== 'string') {
-                        return item;
-                    }
-
-                    const $ = load(response);
-                    const content = $(p.itemContent).first().html();
-                    logger.info(`[_transform/rss] Content: ${content?.slice(0, 500)}`);
-                    if (!content) {
-                        return item;
-                    }
-                    const sanitized = sanitizeHtml(content, {
-                        allowedTags: [...sanitizeHtml.defaults.allowedTags, 'img', 'video', 'audio'],
-                    });
-                    item.description = sanitized;
-
-                    // if (p.itemContentAttachments) {
-                    //     const attachments = $(p.itemContentAttachments).toArray().map((el) => {
-                    //         const $el = $(el);
-                    //         const url = [$el.attr('data-src'), $el.attr('src'), $el.attr('href')].find((u) => u?.startsWith('http'));
-                    //         if (url) {
-                    //             return {
-                    //                 url,
-                    //                 mime_type: $el.attr('type') || '*/*',
-                    //                 title: $el.attr('alt') || $el.attr('title'),
-                    //             };
-                    //         }
-                    //         return null;
-                    //     }).filter((a) => a !== null);
-                    //     if (attachments.length > 0) {
-                    //         item.attachments = attachments;
-                    //     }
-                    // }
-
-                    return item;
-                });
-            })
-        );
-    }
+    await session.close();
 
     return {
-        ...header,
-        item: items as DataItem[],
+        ...data,
+        link: url,
     };
 }
 

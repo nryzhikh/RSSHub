@@ -149,7 +149,7 @@ export const getPuppeteerPage = async (
 
     setTimeout(async () => {
         await browser.close();
-    }, 30000);
+    }, 60000);
 
     const page = await browser.newPage();
 
