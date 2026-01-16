@@ -13,6 +13,7 @@ type Options = {
     cachePrefix: string;
     articleSelector: string;
     articleMediaSelector?: string;
+    articleMediaAttributes?: string[];
     articleTextSelectors?: string;
     session?: BrowserSession;
     exclude?: string;
@@ -22,7 +23,7 @@ type Options = {
 const MEDIA_URL_ATTRIBUTES: string[] = ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-url', 'data-image', 'data-img', 'srcset', 'data-srcset'];
 
 export async function getContent(items: DataItem[], options: Options) {
-    const { cachePrefix, session, articleSelector, articleMediaSelector, articleTextSelectors, exclude, include } = options;
+    const { cachePrefix, session, articleSelector, articleMediaSelector, articleTextSelectors, exclude, include, articleMediaAttributes } = options;
     const results = await Promise.all(
         items.map(async (item) => {
             try {
@@ -42,7 +43,7 @@ export async function getContent(items: DataItem[], options: Options) {
 
                 // Only proceed with fetch if not cached
                 const response = session ? await session.gotoAndFetch(item.link, articleSelector) : await got(item.link).text();
-                // logger.info(`[_transform/get-content] Response: ${response ? response.slice(0, 500) : 'null'}...`);
+                logger.debug(`[_transform/get-content] Response: ${response ? response.slice(0, 500) : 'null'}...`);
 
                 if (!response) {
                     return item; // Don't cache failures
@@ -156,10 +157,11 @@ export async function getContent(items: DataItem[], options: Options) {
                 let attachments: DataItem['attachments'] = [];
                 if (articleMediaSelector) {
                     logger.debug(`[_transform/get-content] Article media selector: ${articleMediaSelector}`);
+                    const attributes = articleMediaAttributes || MEDIA_URL_ATTRIBUTES;
                     attachments = $(articleMediaSelector)
                         .toArray()
                         .map((att) => {
-                            for (const attribute of MEDIA_URL_ATTRIBUTES) {
+                            for (const attribute of attributes) {
                                 let url = $(att).attr(attribute)?.split(',')[0]?.trim();
                                 try {
                                     url = new URL(url ?? 'x', item.link).href;

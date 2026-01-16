@@ -53,6 +53,7 @@ async function handler(ctx) {
 
     const session = new BrowserSession();
     const response = routeParams.useBrowser ? await session.gotoAndFetch(url, routeParams.item) : await got(url).text();
+    // logger.info(`[_transform/html] Response: ${response ? response.slice(0, 3000) : 'null'}...`);
 
     if (!response) {
         logger.error(`[_transform/rss2] No RSS feed found`);
@@ -61,6 +62,7 @@ async function handler(ctx) {
     }
 
     const datetimeParser = new DateTimeParser(routeParams.timezoneOffset, routeParams.locale);
+    // logger.info(`[_transform/html] Datetime parser: ${datetimeParser}`);
 
     const $ = load(response);
     const data: Data = {
@@ -74,6 +76,7 @@ async function handler(ctx) {
             break;
         }
         const $item = $(item);
+        // logger.info(`[_transform/html] Item: ${$item.html()}`);
 
         let link = getValue($item, routeParams.feed?.link || { element: 'a', attr: 'href' }, 'html') || $item.attr('href');
         if (link && !link.startsWith('http')) {
@@ -106,7 +109,8 @@ async function handler(ctx) {
     data.item = await getContent(data.item, {
         cachePrefix: `_transform:${url}:${routeParamsString}`,
         articleSelector: routeParams.content,
-        articleMediaSelector: routeParams.media,
+        articleMediaSelector: typeof routeParams.media === 'string' ? routeParams.media : routeParams.media?.element,
+        articleMediaAttributes: typeof routeParams.media === 'object' ? routeParams.media?.attrs : undefined,
         articleTextSelectors: routeParams.contentText,
         session: routeParams.useBrowser ? session : undefined,
         exclude: routeParams.exclude,

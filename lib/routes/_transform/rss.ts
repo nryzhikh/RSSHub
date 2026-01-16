@@ -36,7 +36,7 @@ async function handler(ctx) {
         : await got(url).text();
 
     if (!response) {
-        logger.error(`[_transform/rss2] No RSS feed found`);
+        logger.error(`[_transform/rss] No RSS feed found`);
         await session.close();
         return null;
     }
@@ -69,7 +69,7 @@ async function handler(ctx) {
                     return;
                 }
                 const name = feedMap?.[child.tagName] || child.tagName;
-                logger.info(`[_transform/rss2] name: ${name} text: ${$(child).text().trim()}`);
+                // logger.info(`[_transform/rss2] name: ${name} text: ${$(child).text().trim()}`);
                 if (name === 'category') {
                     item.category = item.category ?? [];
                     item.category.push($(child).text().trim());
@@ -127,7 +127,8 @@ async function handler(ctx) {
     data.item = await getContent(data.item, {
         cachePrefix: `_transform:${url}:${routeParamsString}`,
         articleSelector: routeParams.content,
-        articleMediaSelector: routeParams.media,
+        articleMediaSelector: typeof routeParams.media === 'string' ? routeParams.media : routeParams.media?.element,
+        articleMediaAttributes: typeof routeParams.media === 'object' ? routeParams.media?.attrs : undefined,
         session: routeParams.useBrowser ? session : undefined,
         exclude: routeParams.exclude,
     });

@@ -5,7 +5,7 @@ export type RouteParams = {
     exclude?: string;
     include?: string;
     contentText?: string;
-    media?: string;
+    media?: string | { element: string; attrs?: string[] };
     useBrowser?: boolean;
     maxItems?: number;
     filterCategory?: string[];
